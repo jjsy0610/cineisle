@@ -12,7 +12,17 @@
 
 公开版支持在设置里填写 **AI 名字**。填写后，App / PWA 内和 MCP 截图请求会同步这个名字，例如「给小G看一眼」「给林澈看一眼」。
 
-## 本次更新：v0.4.4 Railway 部署与固定签名
+## 本次更新：v0.5.0 挂机陪看
+
+- 新增 MCP `watch_room`：一次调用可挂等最多 55 秒，房间出现新聊天、低频画面或散场指令时立即返回。
+- 返回值包含续接游标与 `next_call`；AI 在同一轮工具调用链里继续调用，即可像对弈挂机模式一样持续陪看，无需观影人反复切回聊天窗口。
+- 新增 `stop_watching`，并支持在房间聊天发送“散场”“停止陪看”“结束陪看”来结束挂等。
+- AI 写回房间的消息默认不会再次唤醒自己，防止回复回声循环。
+- Android 原有 15 秒截图上传不变；后端默认每 45 秒至多产生一个画面事件，聊天到达时仍会附带当时最新画面，兼顾氛围、额度与上下文。
+
+详细使用方法见 [`docs/MCP_ROOM_WATCH.md`](docs/MCP_ROOM_WATCH.md)。
+
+### v0.4.4 Railway 部署与固定签名
 
 - 新增 Railway 部署配置：根目录加入 `railway.json`、`Dockerfile`、`start.sh` 和根目录 `package.json`，避免 Railway 把 Android Gradle 工程误判成后端服务。
 - Railway 部署时只运行 `server/` 后端，并配置 `/api/health` 健康检查。
@@ -51,6 +61,7 @@
 - 低频画面截图：Android App 开启无障碍服务后可低频上传；PWA 可手动截取当前本地视频帧上传
 - 最近画面时间线：后端保留最近 5 张截图摘要，方便 AI 理解刚刚发生了什么
 - MCP 接口：让 ChatGPT / 其他支持 MCP 的 AI 读房间、发弹幕、控制播放、请求截图、读取观影上下文、生成卡片；截图返回 `image_url` 与文本兜底，播放问题可读调试信息
+- MCP 挂机陪看：等待新聊天、低频画面或散场事件；配合返回的 `next_call` 在同一轮持续守候
 
 
 ### 用户反馈排查说明
@@ -488,6 +499,8 @@ https://cineisle-server.onrender.com/mcp?token=change-me
 | --- | --- |
 | `create_room` | 创建观影房间 |
 | `get_room_state` | 读取房间状态、播放进度、聊天、笔记和卡片 |
+| `watch_room` | 挂等新聊天、低频画面或散场事件，并返回续接游标 |
+| `stop_watching` | 结束当前挂机陪看链，不删除房间或影片状态 |
 | `send_room_message` | 发送聊天或弹幕 |
 | `control_playback` | 同步播放、暂停、跳转进度 |
 | `add_note` | 添加时间轴观影笔记 |
@@ -517,6 +530,10 @@ https://cineisle-server.onrender.com/mcp?token=change-me
 请根据房间 ABC123 的观影笔记生成一张电影票根。
 ```
 
+```text
+请挂机陪看房间 ABC123。收到聊天或新画面后自行决定是否回复；继续陪看时按 next_call 立即再次调用 watch_room，直到我在房间里说“散场”。
+```
+
 ---
 
 # 安全和隐私说明
@@ -538,7 +555,7 @@ https://cineisle-server.onrender.com/mcp?token=change-me
 当前公开版：
 
 ```text
-CineIsle Public v0.4.4 Railway 部署与固定签名
+CineIsle Public v0.5.0 挂机陪看
 ```
 
 公开版已移除私人称呼和私密标识，适合开源、自部署和二次定制。

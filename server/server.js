@@ -6,15 +6,101 @@ const path = require("path");
 const app = express();
 const PORT = process.env.PORT || 8787;
 const TOKEN = process.env.CINEISLE_TOKEN || process.env.LINJIAN_CINEMA_TOKEN || "";
-const APP_VERSION = "0.4.7-mcp-playback-command-fix";
+const APP_VERSION = "0.5.0-mcp-room-watch";
 
 app.use(cors());
 app.use(express.json({ limit: "6mb" }));
 app.use(express.static("public"));
 
 const rooms = new Map();
+const roomEvents = new Map();
+const FRAME_EVENT_MIN_INTERVAL_MS = Math.max(15_000, Number(process.env.CINEISLE_FRAME_EVENT_INTERVAL_MS || 45_000));
 const DATA_FILE = process.env.CINEISLE_DATA_FILE || process.env.LINJIAN_CINEMA_DATA_FILE || path.join(process.cwd(), "cineisle-data.json");
 let saveTimer = null;
+
+function getRoomEventState(roomId) {
+  const id = String(roomId || "").trim().toUpperCase();
+  if (!roomEvents.has(id)) roomEvents.set(id, { nextSeq: 1, events: [], waiters: new Set(), lastFrameEventAt: 0 });
+  return roomEvents.get(id);
+}
+
+function currentRoomCursor(roomId) {
+  return getRoomEventState(roomId).nextSeq - 1;
+}
+
+function isWatchStopText(text) {
+  return /^(?:\/?(?:散场|停止陪看|结束陪看|stop|end))\s*[！!。.]?$/i.test(String(text || "").trim());
+}
+
+function eventMatches(event, options) {
+  if (!options.types.has(event.type)) return false;
+  if (options.ignoreAssistant && event.type === "message" && event.source === "assistant") return false;
+  return true;
+}
+
+function collectRoomEvents(roomId, after, options) {
+  const state = getRoomEventState(roomId);
+  return state.events.filter(event => event.seq > after && eventMatches(event, options)).slice(0, 20);
+}
+
+function makeWatchResult(r, req, after, events, options, timedOut) {
+  const cursor = events.length ? events[events.length - 1].seq : Math.max(after, currentRoomCursor(r.id));
+  const context = compactContext(r.context, options.includeScreenshot && events.length > 0, req, r.id);
+  const stopped = events.some(event => event.type === "stop");
+  return {
+    ok: true,
+    room: r.id,
+    cursor,
+    timedOut: Boolean(timedOut),
+    stopped,
+    events,
+    playback: { currentTime: r.currentTime, duration: r.duration, paused: r.paused, lastActor: r.lastActor },
+    context,
+    next_call: stopped ? null : {
+      name: "watch_room",
+      arguments: {
+        room: r.id,
+        cursor,
+        timeoutSeconds: options.timeoutSeconds,
+        eventTypes: Array.from(options.types),
+        includeScreenshot: options.includeScreenshot,
+        ignoreAssistant: options.ignoreAssistant
+      }
+    },
+    model_note: events.length
+      ? "处理这些房间事件；可回复、控制播放或保持沉默。若继续陪看，请立即按 next_call 再次调用 watch_room。"
+      : "本次挂等心跳超时，没有新事件。若继续陪看，请立即按 next_call 再次调用 watch_room。"
+  };
+}
+
+function waitForRoomEvents(r, req, after, options) {
+  const ready = collectRoomEvents(r.id, after, options);
+  if (ready.length) return Promise.resolve(makeWatchResult(r, req, after, ready, options, false));
+  const state = getRoomEventState(r.id);
+  return new Promise(resolve => {
+    const waiter = { after, options, resolve: null, timer: null };
+    const finish = (events, timedOut) => {
+      if (!state.waiters.delete(waiter)) return;
+      if (waiter.timer) clearTimeout(waiter.timer);
+      resolve(makeWatchResult(r, req, after, events, options, timedOut));
+    };
+    waiter.resolve = () => finish(collectRoomEvents(r.id, after, options), false);
+    waiter.timer = setTimeout(() => finish([], true), options.timeoutSeconds * 1000);
+    state.waiters.add(waiter);
+  });
+}
+
+function emitRoomEvent(r, type, payload = {}) {
+  if (!r || !r.id) return null;
+  const state = getRoomEventState(r.id);
+  const event = { seq: state.nextSeq++, type, at: now(), ...payload };
+  state.events.push(event);
+  if (state.events.length > 160) state.events.splice(0, state.events.length - 160);
+  for (const waiter of Array.from(state.waiters)) {
+    if (event.seq > waiter.after && eventMatches(event, waiter.options)) waiter.resolve();
+  }
+  return event;
+}
 
 function scheduleSave() {
   if (saveTimer) clearTimeout(saveTimer);
@@ -243,8 +329,9 @@ app.get("/api/rooms/:id",(req,res)=>{
 app.post("/api/rooms/:id/message", auth, (req,res)=>{
   const r = ensure(req.params.id);
   applyAssistantName(r, req.body);
-  const m = { id:Date.now()+"", name:req.body.name || "观影人", text:String(req.body.text || "").slice(0,500), at:now() };
+  const m = { id:Date.now()+"", name:req.body.name || "观影人", text:String(req.body.text || "").slice(0,500), danmaku:Boolean(req.body.danmaku), at:now() };
   r.messages.push(m); r.updatedAt = now(); scheduleSave();
+  emitRoomEvent(r, isWatchStopText(m.text) ? "stop" : "message", { source:"app", message:m });
   res.json({ok:true, message:m, room:pub(r, req)});
 });
 app.post("/api/rooms/:id/playback", auth, (req,res)=>{
@@ -364,6 +451,15 @@ app.post("/api/rooms/:id/screenshot", auth, (req,res)=>{
   ctx.actor = String(req.body.actor || req.body.name || ctx.actor || "观影人").slice(0,80);
   ctx.observedAt = now();
   r.updatedAt = now(); scheduleSave();
+  const eventState = getRoomEventState(r.id);
+  const uploadedAtMs = Date.parse(ctx.latestFrame.uploadedAt) || Date.now();
+  if (!eventState.lastFrameEventAt || uploadedAtMs - eventState.lastFrameEventAt >= FRAME_EVENT_MIN_INTERVAL_MS) {
+    eventState.lastFrameEventAt = uploadedAtMs;
+    emitRoomEvent(r, "frame", {
+      source:"app",
+      frame:{ id:ctx.latestFrame.id, uploadedAt:ctx.latestFrame.uploadedAt, width:ctx.latestFrame.width, height:ctx.latestFrame.height, source:ctx.latestFrame.source }
+    });
+  }
   res.json({ok:true, frame: compactContext(ctx, false, req, r.id).latestFrame, ocrText, fallbackText, room: pub(r, req)});
 });
 
@@ -453,6 +549,34 @@ function mcpTools() {
         type: "object",
         properties: {
           room: { type: "string", description: "房间号" }
+        },
+        required: ["room"]
+      }
+    },
+    {
+      name: "watch_room",
+      description: "挂等观影房间的新聊天、低频画面或散场事件。收到事件后处理它，并在仍需陪看时立即按 next_call 继续挂等；这不是后台推送，必须保持当前工具调用链。",
+      inputSchema: {
+        type: "object",
+        properties: {
+          room: { type: "string", description: "房间号" },
+          cursor: { type: "integer", description: "上次返回的事件游标；首次可不填，从当前时刻开始等待" },
+          timeoutSeconds: { type: "integer", description: "单次挂等秒数，5-55，默认 45" },
+          eventTypes: { type: "array", items: { type: "string", enum: ["message", "frame", "stop"] }, description: "要等待的事件类型，默认聊天、画面和散场" },
+          includeScreenshot: { type: "boolean", description: "有事件时是否附带最新画面，默认 true" },
+          ignoreAssistant: { type: "boolean", description: "是否忽略 AI 自己写回的消息，默认 true，防止回声循环" }
+        },
+        required: ["room"]
+      }
+    },
+    {
+      name: "stop_watching",
+      description: "向房间发出散场事件，结束当前挂等陪看链；不会删除房间或影片状态。",
+      inputSchema: {
+        type: "object",
+        properties: {
+          room: { type: "string", description: "房间号" },
+          actor: { type: "string", description: "发起散场者" }
         },
         required: ["room"]
       }
@@ -679,7 +803,7 @@ function mcpPayload(obj) {
   return out;
 }
 
-function callCinemaTool(name, args, req) {
+async function callCinemaTool(name, args, req) {
   args = args || {};
 
   if (name === "create_room") {
@@ -700,6 +824,32 @@ function callCinemaTool(name, args, req) {
     return pub(r, req);
   }
 
+  if (name === "watch_room") {
+    const r = rooms.get(String(args.room || args.room_id || "").toUpperCase());
+    if (!r) throw new Error("ROOM_NOT_FOUND");
+    const requestedTimeout = Number(args.timeoutSeconds);
+    const timeoutSeconds = Number.isFinite(requestedTimeout)
+      ? Math.min(55, Math.max(5, Math.floor(requestedTimeout)))
+      : 45;
+    const allowedTypes = new Set(["message", "frame", "stop"]);
+    const requestedTypes = Array.isArray(args.eventTypes) ? args.eventTypes.filter(type => allowedTypes.has(type)) : [];
+    const options = {
+      timeoutSeconds,
+      types: new Set(requestedTypes.length ? requestedTypes : ["message", "frame", "stop"]),
+      includeScreenshot: args.includeScreenshot !== false,
+      ignoreAssistant: args.ignoreAssistant !== false
+    };
+    const after = Number.isFinite(Number(args.cursor)) ? Math.max(0, Math.floor(Number(args.cursor))) : currentRoomCursor(r.id);
+    return waitForRoomEvents(r, req, after, options);
+  }
+
+  if (name === "stop_watching") {
+    const r = rooms.get(String(args.room || args.room_id || "").toUpperCase());
+    if (!r) throw new Error("ROOM_NOT_FOUND");
+    const event = emitRoomEvent(r, "stop", { source:"assistant", actor:args.actor || defaultAssistant(r) });
+    return { ok:true, room:r.id, stopped:true, event };
+  }
+
   if (name === "send_room_message") {
     const r = ensure(args.room || args.room_id);
     const text = args.danmaku ? "弹幕：" + String(args.text || "") : String(args.text || "");
@@ -707,10 +857,12 @@ function callCinemaTool(name, args, req) {
       id: Date.now() + "",
       name: args.name || defaultAssistant(r),
       text,
+      danmaku: Boolean(args.danmaku),
       at: now()
     };
     r.messages.push(m);
     r.updatedAt = now(); scheduleSave();
+    emitRoomEvent(r, isWatchStopText(m.text) ? "stop" : "message", { source:"assistant", message:m });
     return { message: m, room: pub(r, req) };
   }
 
@@ -831,7 +983,7 @@ function rpcError(id, code, message) {
   return { jsonrpc: "2.0", id, error: { code, message } };
 }
 
-function handleMcpMessage(req, msg) {
+async function handleMcpMessage(req, msg) {
   const id = msg.id;
   const method = msg.method || msg.tool || msg.name;
   const params = msg.params || {};
@@ -860,7 +1012,7 @@ function handleMcpMessage(req, msg) {
     const toolName = params.name;
     const toolArgs = params.arguments || {};
     try {
-      const result = callCinemaTool(toolName, toolArgs, req);
+      const result = await callCinemaTool(toolName, toolArgs, req);
       return rpcResult(id, mcpPayload(result));
     } catch (e) {
       return rpcError(id, -32000, e.message);
@@ -868,10 +1020,10 @@ function handleMcpMessage(req, msg) {
   }
 
   // 兼容旧写法：直接 method=create_room / send_room_message
-  if (["create_room", "get_room_state", "send_room_message", "control_playback", "play_movie", "pause_movie", "seek_movie", "add_note", "generate_card", "get_viewing_context", "request_screenshot", "get_screenshot_text", "get_playback_debug"].includes(method)) {
+  if (["create_room", "get_room_state", "watch_room", "stop_watching", "send_room_message", "control_playback", "play_movie", "pause_movie", "seek_movie", "add_note", "generate_card", "get_viewing_context", "request_screenshot", "get_screenshot_text", "get_playback_debug"].includes(method)) {
     if (!isAuthed(req)) return rpcError(id || 1, -32001, "CINEISLE_BAD_TOKEN");
     try {
-      const result = callCinemaTool(method, args, req);
+      const result = await callCinemaTool(method, args, req);
       return id ? rpcResult(id, mcpPayload(result)) : { ok: true, result };
     } catch (e) {
       return id ? rpcError(id, -32000, e.message) : { ok: false, error: e.message };
@@ -885,15 +1037,15 @@ app.get("/mcp", (req, res) => {
   res.type("text/plain").send("CineIsle MCP endpoint is running. Use POST JSON-RPC.");
 });
 
-app.post("/mcp", (req, res) => {
+app.post("/mcp", async (req, res) => {
   try {
     const body = req.body || {};
     if (Array.isArray(body)) {
-      const out = body.map(msg => handleMcpMessage(req, msg)).filter(Boolean);
+      const out = (await Promise.all(body.map(msg => handleMcpMessage(req, msg)))).filter(Boolean);
       if (out.length === 0) return res.status(204).end();
       return res.json(out);
     }
-    const out = handleMcpMessage(req, body);
+    const out = await handleMcpMessage(req, body);
     if (!out) return res.status(204).end();
     return res.json(out);
   } catch (e) {
