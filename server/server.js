@@ -6,10 +6,14 @@ const path = require("path");
 const app = express();
 const PORT = process.env.PORT || 8787;
 const TOKEN = process.env.CINEISLE_TOKEN || process.env.LINJIAN_CINEMA_TOKEN || "";
-const APP_VERSION = "0.5.0-mcp-room-watch";
+const APP_VERSION = "0.5.1-chat-scroll";
 
 app.use(cors());
 app.use(express.json({ limit: "6mb" }));
+app.use("/mcp", (_req, res, next) => {
+  res.set("Cache-Control", "no-store, no-cache, must-revalidate");
+  next();
+});
 app.use(express.static("public"));
 
 const rooms = new Map();
@@ -995,7 +999,7 @@ async function handleMcpMessage(req, msg) {
   if (method === "initialize") {
     return rpcResult(id, {
       protocolVersion: "2024-11-05",
-      capabilities: { tools: {} },
+      capabilities: { tools: { listChanged: true } },
       serverInfo: {
         name: "映屿 CineIsle · Viewing Context",
         version: APP_VERSION

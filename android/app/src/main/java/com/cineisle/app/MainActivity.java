@@ -41,6 +41,7 @@ public class MainActivity extends Activity {
     private VideoView video;
     private Button navHome, navRoom, navHall, navCard, navFavorites;
     private TextView roomTitle, roomCodeView, syncState, chatLog, noteLog, cardPreview, memberState, homeStatus, homeSub, heroBadge, fullChatLog, movieLibraryList, favoritesList, inviteSummary, importState;
+    private ScrollView chatScroll;
     private EditText serverInput, tokenInput, nameInput, assistantNameInput, roomInput, chatInput, noteInput, quoteInput, cardNoteInput, linQuoteInput, linNoteInput, inviteMovieInput, invitePartnerInput, inviteMoodInput, inviteNoteInput;
     private Handler handler = new Handler();
     private boolean polling = false;
@@ -766,11 +767,24 @@ public class MainActivity extends Activity {
         chatP.addView(small("聊天像留言，弹幕像漂过银幕的小纸条，都会进入本场观影时间轴。"));
         chatLog = tv("还没有聊天。第一句可以留给今晚的电影。", 13, Typeface.NORMAL);
         chatLog.setTextColor(ink());
-        chatLog.setMovementMethod(new ScrollingMovementMethod());
         chatLog.setMinHeight(dp(150));
         chatLog.setBackground(round(cardSoft(), 20));
         chatLog.setPadding(dp(14), dp(14), dp(14), dp(14));
-        add(chatP, chatLog, -1, 170, 10);
+        chatScroll = new ScrollView(this);
+        chatScroll.setFillViewport(true);
+        chatScroll.setVerticalScrollBarEnabled(true);
+        chatScroll.setOverScrollMode(View.OVER_SCROLL_IF_CONTENT_SCROLLS);
+        chatScroll.addView(chatLog, new ScrollView.LayoutParams(-1, -2));
+        chatScroll.setOnTouchListener((v, event) -> {
+            ViewParent parent = v.getParent();
+            if (parent != null) {
+                boolean keepChatGesture = event.getAction() != MotionEvent.ACTION_UP
+                        && event.getAction() != MotionEvent.ACTION_CANCEL;
+                parent.requestDisallowInterceptTouchEvent(keepChatGesture);
+            }
+            return false;
+        });
+        add(chatP, chatScroll, -1, 170, 10);
         chatInput = input("今晚想和对方说什么？", "");
         add(chatP, chatInput, -1, 48, 10);
         LinearLayout cr = hbox();
@@ -2146,6 +2160,7 @@ public class MainActivity extends Activity {
         final String pendingId = "local-" + System.currentTimeMillis() + "-" + Math.abs(out.hashCode());
         pendingChats.add(new PendingChat(pendingId, name, out));
         appendChat(name, out + "（发送中…）");
+        scrollChatToBottom();
         if (dm && danmakuOn) showDanmaku(text);
         new Thread(() -> {
             try {
@@ -2314,9 +2329,11 @@ public class MainActivity extends Activity {
             chatLog.setText("");
             if (fullChatLog != null) fullChatLog.setText("");
             JSONArray msgs = room.optJSONArray("messages");
+            String newestMessageKey = "";
             if (msgs != null) {
                 for (int i = Math.max(0, msgs.length()-30); i < msgs.length(); i++) {
                     JSONObject m = msgs.getJSONObject(i);
+                    newestMessageKey = m.optString("id", "") + "|" + m.optString("at", "") + "|" + m.optString("text", "");
                     String msgName = m.optString("name","观影人");
                     String msgText = m.optString("text","");
                     appendChat(msgName, msgText);
@@ -2332,6 +2349,10 @@ public class MainActivity extends Activity {
             }
             renderPendingChats();
             if (chatLog.getText().length() == 0) chatLog.setText("还没有聊天。第一句可以留给今晚的电影。");
+            if (!newestMessageKey.equals(lastChatMessageKey)) {
+                lastChatMessageKey = newestMessageKey;
+                scrollChatToBottom();
+            }
             noteLog.setText("");
             JSONArray notes = room.optJSONArray("notes");
             if (notes != null) {
@@ -2443,6 +2464,13 @@ public class MainActivity extends Activity {
             if (f.startsWith("还没有聊天")) f = "";
             fullChatLog.setText(f + (f.length()>0 ? "\n" : "") + line);
         }
+    }
+
+    private String lastChatMessageKey = "";
+
+    private void scrollChatToBottom() {
+        if (chatScroll == null) return;
+        chatScroll.post(() -> chatScroll.fullScroll(View.FOCUS_DOWN));
     }
 
     private void appendNote(String who, String text, int sec) {
