@@ -6,7 +6,7 @@ const path = require("path");
 const app = express();
 const PORT = process.env.PORT || 8787;
 const TOKEN = process.env.CINEISLE_TOKEN || process.env.LINJIAN_CINEMA_TOKEN || "";
-const APP_VERSION = "0.5.1-chat-scroll";
+const APP_VERSION = "0.5.2-landscape-cinema";
 
 app.use(cors());
 app.use(express.json({ limit: "6mb" }));
@@ -669,7 +669,7 @@ function mcpTools() {
     },
     {
       name: "request_screenshot",
-      description: "请求手机端立即上传一张当前屏幕截图；类似掌心窗 peek，但只在用户开启映屿截图权限后生效",
+      description: "请求 Android 映屿 App 在前台时上传一张放映幕裁切图；不会上传聊天抽屉或其他 App 画面",
       inputSchema: {
         type: "object",
         properties: {

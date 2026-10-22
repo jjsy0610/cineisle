@@ -29,6 +29,13 @@ import org.json.*;
 
 public class MainActivity extends Activity {
     private android.widget.FrameLayout fullscreenDanmakuRoot = null;
+    private FrameLayout fullscreenCinemaRoot = null;
+    private LinearLayout fullscreenChatPanel = null;
+    private TextView fullscreenChatHistory = null;
+    private ScrollView fullscreenChatScroll = null;
+    private TextView fullscreenMessageBubble = null;
+    private Runnable fullscreenBubbleHideTask = null;
+    private String lastFullscreenBubbleMessageKey = "";
     private LinearLayout root, pageHome, pageRoom, pageHall, pageCard, pageFavorites;
     private String theme = "night";
     private String serverUrl = "";
@@ -1482,6 +1489,38 @@ public class MainActivity extends Activity {
         if (page.equals("card") && roomId.length() > 0) fetchRoom();
         if (page.equals("hall")) refreshMovieLibrary();
         if (page.equals("favorites")) refreshFavorites();
+        if (page.equals("room") && videoFrame != null) publishCaptureBounds(videoFrame, false);
+        else clearCaptureBounds();
+    }
+
+    private void publishCaptureBounds(final View target, final boolean fullscreen) {
+        if (target == null) return;
+        target.postDelayed(() -> {
+            try {
+                if (target.getWidth() <= 0 || target.getHeight() <= 0 || !target.isShown()) return;
+                int[] loc = new int[2];
+                target.getLocationOnScreen(loc);
+                android.util.DisplayMetrics dm = getResources().getDisplayMetrics();
+                getSharedPreferences("cineisle", 0).edit()
+                        .putBoolean("captureBoundsValid", true)
+                        .putBoolean("captureFullscreen", fullscreen)
+                        .putInt("captureLeft", Math.max(0, loc[0]))
+                        .putInt("captureTop", Math.max(0, loc[1]))
+                        .putInt("captureWidth", target.getWidth())
+                        .putInt("captureHeight", target.getHeight())
+                        .putInt("captureScreenWidth", dm.widthPixels)
+                        .putInt("captureScreenHeight", dm.heightPixels)
+                        .putLong("captureBoundsAt", System.currentTimeMillis())
+                        .apply();
+            } catch(Exception ignored) {}
+        }, 350);
+    }
+
+    private void clearCaptureBounds() {
+        getSharedPreferences("cineisle", 0).edit()
+                .putBoolean("captureBoundsValid", false)
+                .putBoolean("captureFullscreen", false)
+                .apply();
     }
 
     private void updateNav(String page) {
@@ -2330,12 +2369,16 @@ public class MainActivity extends Activity {
             if (fullChatLog != null) fullChatLog.setText("");
             JSONArray msgs = room.optJSONArray("messages");
             String newestMessageKey = "";
+            String newestMessageName = "";
+            String newestMessageText = "";
             if (msgs != null) {
                 for (int i = Math.max(0, msgs.length()-30); i < msgs.length(); i++) {
                     JSONObject m = msgs.getJSONObject(i);
                     newestMessageKey = m.optString("id", "") + "|" + m.optString("at", "") + "|" + m.optString("text", "");
                     String msgName = m.optString("name","观影人");
                     String msgText = m.optString("text","");
+                    newestMessageName = msgName;
+                    newestMessageText = msgText;
                     appendChat(msgName, msgText);
 
                     if (msgText.startsWith("弹幕：") && danmakuOn) {
@@ -2349,9 +2392,24 @@ public class MainActivity extends Activity {
             }
             renderPendingChats();
             if (chatLog.getText().length() == 0) chatLog.setText("还没有聊天。第一句可以留给今晚的电影。");
+            if (fullscreenChatHistory != null) {
+                fullscreenChatHistory.setText(chatLog.getText());
+                if (fullscreenChatScroll != null) {
+                    fullscreenChatScroll.post(() -> fullscreenChatScroll.fullScroll(View.FOCUS_DOWN));
+                }
+            }
             if (!newestMessageKey.equals(lastChatMessageKey)) {
+                boolean hadPreviousMessage = lastChatMessageKey.length() > 0;
                 lastChatMessageKey = newestMessageKey;
                 scrollChatToBottom();
+                if (hadPreviousMessage
+                        && newestMessageKey.length() > 0
+                        && !newestMessageKey.equals(lastFullscreenBubbleMessageKey)
+                        && !newestMessageName.equals(name)
+                        && !newestMessageText.startsWith("弹幕：")) {
+                    lastFullscreenBubbleMessageKey = newestMessageKey;
+                    showFullscreenIncomingBubble(newestMessageName, newestMessageText);
+                }
             }
             noteLog.setText("");
             JSONArray notes = room.optJSONArray("notes");
@@ -2467,6 +2525,38 @@ public class MainActivity extends Activity {
     }
 
     private String lastChatMessageKey = "";
+
+    private void setFullscreenChatPanelVisible(boolean visible) {
+        if (fullscreenChatPanel == null) return;
+        fullscreenChatPanel.setVisibility(visible ? View.VISIBLE : View.GONE);
+        if (visible) {
+            fullscreenChatPanel.bringToFront();
+            if (fullscreenChatScroll != null) {
+                fullscreenChatScroll.post(() -> fullscreenChatScroll.fullScroll(View.FOCUS_DOWN));
+            }
+        }
+    }
+
+    private void showFullscreenIncomingBubble(String who, String text) {
+        if (fullscreenMessageBubble == null || fullscreenCinemaRoot == null) return;
+        String clean = text == null ? "" : text.trim();
+        if (clean.length() == 0) return;
+        if (clean.length() > 88) clean = clean.substring(0, 88) + "…";
+        fullscreenMessageBubble.setText("💬 " + (who == null ? aiName() : who) + "：" + clean);
+        fullscreenMessageBubble.setAlpha(0f);
+        fullscreenMessageBubble.setVisibility(View.VISIBLE);
+        fullscreenMessageBubble.bringToFront();
+        fullscreenMessageBubble.animate().alpha(1f).setDuration(180).start();
+        if (fullscreenBubbleHideTask != null) handler.removeCallbacks(fullscreenBubbleHideTask);
+        fullscreenBubbleHideTask = () -> {
+            if (fullscreenMessageBubble == null) return;
+            fullscreenMessageBubble.animate().alpha(0f).setDuration(260)
+                    .withEndAction(() -> {
+                        if (fullscreenMessageBubble != null) fullscreenMessageBubble.setVisibility(View.GONE);
+                    }).start();
+        };
+        handler.postDelayed(fullscreenBubbleHideTask, 6500);
+    }
 
     private void scrollChatToBottom() {
         if (chatScroll == null) return;
@@ -2665,6 +2755,32 @@ public class MainActivity extends Activity {
 
 
 
+    private Button fullscreenButton(String text, boolean primary) {
+        Button b = new Button(this);
+        b.setText(text);
+        b.setAllCaps(false);
+        b.setTextSize(12);
+        b.setTypeface(Typeface.DEFAULT_BOLD);
+        b.setTextColor(Color.WHITE);
+        b.setPadding(dp(7), 0, dp(7), 0);
+        b.setBackground(primary
+                ? grad(new int[]{color("#7C9CFF"), color("#BE86FF")}, 16)
+                : round(color("#CC202B48"), 16));
+        return b;
+    }
+
+    private void focusFullscreenInput(EditText input) {
+        if (input == null) return;
+        setFullscreenChatPanelVisible(true);
+        input.requestFocus();
+        input.postDelayed(() -> {
+            try {
+                InputMethodManager imm = (InputMethodManager)getSystemService(INPUT_METHOD_SERVICE);
+                if (imm != null) imm.showSoftInput(input, InputMethodManager.SHOW_IMPLICIT);
+            } catch(Exception ignored) {}
+        }, 160);
+    }
+
     private void openCinemaFullscreen() {
         if (video == null || videoFrame == null) {
             toast("先进入房间页");
@@ -2673,7 +2789,7 @@ public class MainActivity extends Activity {
 
         final FrameLayout originFrame = videoFrame;
         final ViewGroup oldParent = (ViewGroup) video.getParent();
-
+        final ViewGroup oldSubtitleParent = subtitleOverlay == null ? null : (ViewGroup) subtitleOverlay.getParent();
         if (oldParent == null) {
             toast("先导入影片");
             return;
@@ -2682,17 +2798,17 @@ public class MainActivity extends Activity {
         rememberPlaybackPosition();
         final int enterPosMs = outboundPositionMs();
         final boolean enterPlaying = video.isPlaying();
-        try {
-            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
-        } catch (Exception ignored) {}
+        lastFullscreenBubbleMessageKey = lastChatMessageKey;
+        try { setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE); }
+        catch (Exception ignored) {}
 
         final Dialog d = new Dialog(this);
         d.requestWindowFeature(Window.FEATURE_NO_TITLE);
         d.setCanceledOnTouchOutside(false);
 
-        FrameLayout root = new FrameLayout(this);
-        fullscreenDanmakuRoot = root;
-        root.setBackgroundColor(Color.BLACK);
+        final FrameLayout root = new FrameLayout(this);
+        fullscreenCinemaRoot = root;
+        root.setBackgroundColor(color("#060914"));
         root.setSystemUiVisibility(
                 View.SYSTEM_UI_FLAG_FULLSCREEN
                         | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
@@ -2702,168 +2818,224 @@ public class MainActivity extends Activity {
                         | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
         );
 
-        FrameLayout host = new FrameLayout(this);
-        host.setBackgroundColor(Color.BLACK);
-        host.setClipChildren(false);
-        host.setClipToPadding(false);
+        final FrameLayout host = new FrameLayout(this);
+        host.setBackground(round(color("#02040A"), 24));
+        host.setClipChildren(true);
+        host.setClipToPadding(true);
+        if (Build.VERSION.SDK_INT >= 21) {
+            host.setClipToOutline(true);
+            host.setElevation(dp(8));
+        }
 
         oldParent.removeView(video);
         host.addView(video, new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
+        if (oldSubtitleParent != null) {
+            oldSubtitleParent.removeView(subtitleOverlay);
+            FrameLayout.LayoutParams subLp = new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+            subLp.setMargins(dp(18), 0, dp(18), dp(16));
+            host.addView(subtitleOverlay, subLp);
+        }
         videoFrame = host;
+        fullscreenDanmakuRoot = host;
+        host.setOnClickListener(v -> togglePlay());
         try {
             video.seekTo(enterPosMs);
             if (enterPlaying) video.start();
         } catch (Exception ignored) {}
 
-        root.addView(host, new FrameLayout.LayoutParams(-1, -1));
+        FrameLayout.LayoutParams hostLp = new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER);
+        hostLp.setMargins(dp(18), dp(12), dp(18), dp(70));
+        root.addView(host, hostLp);
 
         final LinearLayout panel = vbox();
-        panel.setPadding(dp(12), dp(12), dp(12), dp(12));
-        panel.setBackground(round(color("#DD111827"), 22));
+        fullscreenChatPanel = panel;
+        panel.setPadding(dp(14), dp(14), dp(14), dp(14));
+        panel.setBackground(round(color("#F2111930"), 24));
+        if (Build.VERSION.SDK_INT >= 21) panel.setElevation(dp(24));
 
-        TextView title = tv("映屿弹幕间", 15, Typeface.BOLD);
+        LinearLayout panelHead = hbox();
+        TextView title = tv("映屿悄悄话", 16, Typeface.BOLD);
         title.setTextColor(Color.WHITE);
-        panel.addView(title);
+        panelHead.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
+        Button hidePanel = fullscreenButton("收起", false);
+        panelHead.addView(hidePanel, new LinearLayout.LayoutParams(dp(70), dp(38)));
+        panel.addView(panelHead);
 
-        TextView drawerHint = small("聊天和弹幕分开；这里也能同步进度、" + aiPeekText() + "画面。");
-        drawerHint.setTextColor(color("#E5E7EB"));
-        panel.addView(drawerHint);
+        TextView drawerHint = small("影片不会离开屏幕。聊天留在这里，弹幕飞过银幕。");
+        drawerHint.setTextColor(color("#C9D3F5"));
+        add(panel, drawerHint, -1, -2, 4);
 
-        EditText talkInput = input("聊天：聊天：说一句…", "");
+        fullscreenChatHistory = tv("还没有聊天。", 13, Typeface.NORMAL);
+        fullscreenChatHistory.setTextColor(Color.WHITE);
+        fullscreenChatHistory.setPadding(dp(12), dp(10), dp(12), dp(10));
+        fullscreenChatHistory.setBackground(round(color("#99202A47"), 18));
+        if (chatLog != null) fullscreenChatHistory.setText(chatLog.getText());
+        fullscreenChatScroll = new ScrollView(this);
+        fullscreenChatScroll.setFillViewport(true);
+        fullscreenChatScroll.addView(fullscreenChatHistory, new ScrollView.LayoutParams(-1, -2));
+        LinearLayout.LayoutParams historyLp = new LinearLayout.LayoutParams(-1, 0, 1);
+        historyLp.setMargins(0, dp(8), 0, 0);
+        panel.addView(fullscreenChatScroll, historyLp);
+
+        final EditText talkInput = input("回一句悄悄话…", "");
         talkInput.setTextColor(Color.WHITE);
-        talkInput.setHintTextColor(color("#CBD5E1"));
-        add(panel, talkInput, -1, 42, 8);
+        talkInput.setHintTextColor(color("#AEB9DC"));
+        talkInput.setBackground(round(color("#E2202A47"), 16));
+        final Button sendChat = fullscreenButton("发送", true);
+        LinearLayout talkRow = hbox();
+        talkRow.addView(talkInput, new LinearLayout.LayoutParams(0, dp(42), 1));
+        LinearLayout.LayoutParams sendChatLp = new LinearLayout.LayoutParams(dp(76), dp(42));
+        sendChatLp.setMargins(dp(7), 0, 0, 0);
+        talkRow.addView(sendChat, sendChatLp);
+        add(panel, talkRow, -1, 42, 8);
 
-        Button sendChat = btn("发送聊天", true);
-        add(panel, sendChat, -1, 40, 6);
-
-        EditText dmInput = input("弹幕：让它飘过银幕…", "");
+        final EditText dmInput = input("发一条弹幕…", "");
         dmInput.setTextColor(Color.WHITE);
-        dmInput.setHintTextColor(color("#CBD5E1"));
-        add(panel, dmInput, -1, 42, 10);
+        dmInput.setHintTextColor(color("#AEB9DC"));
+        dmInput.setBackground(round(color("#E2202A47"), 16));
+        final Button sendDm = fullscreenButton("飘过", false);
+        LinearLayout dmRow = hbox();
+        dmRow.addView(dmInput, new LinearLayout.LayoutParams(0, dp(42), 1));
+        LinearLayout.LayoutParams sendDmLp = new LinearLayout.LayoutParams(dp(76), dp(42));
+        sendDmLp.setMargins(dp(7), 0, 0, 0);
+        dmRow.addView(sendDm, sendDmLp);
+        add(panel, dmRow, -1, 42, 7);
 
-        Button sendDm = btn("发送弹幕", false);
-        add(panel, sendDm, -1, 40, 6);
+        final TextView drawerStatus = small("横屏放映厅已准备好。");
+        drawerStatus.setTextColor(color("#C9D3F5"));
+        add(panel, drawerStatus, -1, -2, 6);
 
-        LinearLayout row = hbox();
-        Button syncNow = btn("同步", false);
-        Button peek = btn(aiPeekText(), false);
-        Button close = btn("退出", false);
-        row.addView(syncNow, new LinearLayout.LayoutParams(0, dp(40), 1));
-        LinearLayout.LayoutParams lpPeek = new LinearLayout.LayoutParams(0, dp(40), 1);
-        lpPeek.setMargins(dp(6), 0, 0, 0);
-        row.addView(peek, lpPeek);
-        LinearLayout.LayoutParams lpClose = new LinearLayout.LayoutParams(0, dp(40), 1);
-        lpClose.setMargins(dp(6), 0, 0, 0);
-        row.addView(close, lpClose);
-        add(panel, row, -1, 40, 10);
+        FrameLayout.LayoutParams panelLp = new FrameLayout.LayoutParams(dp(360), -1, Gravity.RIGHT);
+        panelLp.setMargins(dp(10), dp(10), dp(12), dp(70));
+        panel.setVisibility(View.GONE);
+        root.addView(panel, panelLp);
 
-        TextView drawerStatus = small("弹幕间已准备好。");
-        drawerStatus.setTextColor(color("#E5E7EB"));
-        drawerStatus.setBackground(round(color("#33111111"), 16));
-        drawerStatus.setPadding(dp(10), dp(8), dp(10), dp(8));
-        add(panel, drawerStatus, -1, -2, 8);
+        fullscreenMessageBubble = tv("", 13, Typeface.BOLD);
+        fullscreenMessageBubble.setTextColor(Color.WHITE);
+        fullscreenMessageBubble.setMaxWidth(dp(390));
+        fullscreenMessageBubble.setPadding(dp(14), dp(10), dp(14), dp(10));
+        fullscreenMessageBubble.setBackground(round(color("#E52A365B"), 20));
+        fullscreenMessageBubble.setVisibility(View.GONE);
+        if (Build.VERSION.SDK_INT >= 21) fullscreenMessageBubble.setElevation(dp(28));
+        FrameLayout.LayoutParams bubbleLp = new FrameLayout.LayoutParams(-2, -2, Gravity.RIGHT | Gravity.BOTTOM);
+        bubbleLp.setMargins(dp(18), 0, dp(22), dp(78));
+        root.addView(fullscreenMessageBubble, bubbleLp);
+        fullscreenMessageBubble.setOnClickListener(v -> setFullscreenChatPanelVisible(true));
 
+        final LinearLayout toolbar = hbox();
+        toolbar.setGravity(Gravity.CENTER);
+        toolbar.setPadding(dp(7), dp(6), dp(7), dp(6));
+        toolbar.setBackground(round(color("#E5141B30"), 22));
+        if (Build.VERSION.SDK_INT >= 21) toolbar.setElevation(dp(30));
+        final Button openChat = fullscreenButton("聊天", true);
+        final Button openDanmaku = fullscreenButton("发弹幕", false);
+        final Button playPause = fullscreenButton("播放/暂停", false);
+        final Button syncNow = fullscreenButton("同步", false);
+        final Button peek = fullscreenButton(aiPeekText(), false);
+        final Button close = fullscreenButton("退出", false);
+        Button[] toolbarButtons = new Button[]{openChat, openDanmaku, playPause, syncNow, peek, close};
+        for (int i = 0; i < toolbarButtons.length; i++) {
+            LinearLayout.LayoutParams itemLp = new LinearLayout.LayoutParams(0, dp(42), 1);
+            if (i > 0) itemLp.setMargins(dp(5), 0, 0, 0);
+            toolbar.addView(toolbarButtons[i], itemLp);
+        }
+        FrameLayout.LayoutParams toolbarLp = new FrameLayout.LayoutParams(-1, dp(56), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        toolbarLp.setMargins(dp(18), 0, dp(18), dp(8));
+        root.addView(toolbar, toolbarLp);
+
+        hidePanel.setOnClickListener(v -> setFullscreenChatPanelVisible(false));
+        openChat.setOnClickListener(v -> {
+            if (panel.getVisibility() == View.VISIBLE) setFullscreenChatPanelVisible(false);
+            else focusFullscreenInput(talkInput);
+        });
+        openDanmaku.setOnClickListener(v -> focusFullscreenInput(dmInput));
+        playPause.setOnClickListener(v -> togglePlay());
         sendChat.setOnClickListener(v -> {
-            if (chatInput != null) {
-                chatInput.setText(talkInput.getText().toString());
-                sendMessage(false);
+            String out = talkInput.getText().toString().trim();
+            if (sendMessageText(out, false)) {
                 talkInput.setText("");
-                drawerStatus.setText("聊天已发送。");
+                drawerStatus.setText("悄悄话已送到。");
             }
         });
-
+        talkInput.setOnEditorActionListener((v, actionId, event) -> {
+            sendChat.performClick();
+            return true;
+        });
         sendDm.setOnClickListener(v -> {
-            if (chatInput != null) {
-                chatInput.setText(dmInput.getText().toString());
-                sendMessage(true);
+            String out = dmInput.getText().toString().trim();
+            if (sendMessageText(out, true)) {
                 dmInput.setText("");
-                drawerStatus.setText("弹幕已发送。已和聊天分开记录。");
+                drawerStatus.setText("弹幕已经飞过银幕。");
             }
         });
-
+        dmInput.setOnEditorActionListener((v, actionId, event) -> {
+            sendDm.performClick();
+            return true;
+        });
         syncNow.setOnClickListener(v -> {
             rememberPlaybackPosition();
             sendPlayback(true);
             sendCinemaContext(true);
-            drawerStatus.setText("进度已同步：" + formatTime(outboundPositionMs()/1000));
+            drawerStatus.setText("已同步到 " + formatTime(outboundPositionMs()/1000));
             toast("已同步当前进度");
         });
-
         peek.setOnClickListener(v -> {
+            publishCaptureBounds(host, true);
             requestLocalScreenshotNow();
-            drawerStatus.setText("已请求" + aiName() + "看一眼，横屏保持几秒让无障碍上传。");
+            drawerStatus.setText("已请求" + aiName() + "看一眼放映幕。");
         });
-
         close.setOnClickListener(v -> d.dismiss());
 
-        FrameLayout.LayoutParams pp = new FrameLayout.LayoutParams(dp(350), -2, Gravity.RIGHT | Gravity.CENTER_VERTICAL);
-        pp.setMargins(0, 0, dp(12), 0);
-        panel.setVisibility(View.GONE);
-        root.addView(panel, pp);
-
-        final android.widget.TextView fullscreenChatToggle = new android.widget.TextView(this);
-        fullscreenChatToggle.setText(">");
-        fullscreenChatToggle.setTextColor(android.graphics.Color.WHITE);
-        fullscreenChatToggle.setTextSize(26);
-        fullscreenChatToggle.setGravity(android.view.Gravity.CENTER);
-        fullscreenChatToggle.setPadding(dp(8), dp(8), dp(8), dp(8));
-
-        android.graphics.drawable.GradientDrawable fullscreenChatToggleBg = new android.graphics.drawable.GradientDrawable();
-        fullscreenChatToggleBg.setColor(0xAA111827);
-        fullscreenChatToggleBg.setCornerRadius(dp(18));
-        fullscreenChatToggle.setBackground(fullscreenChatToggleBg);
-
-        if (android.os.Build.VERSION.SDK_INT >= 21) {
-            fullscreenChatToggle.setElevation(dp(130));
-        }
-
-        android.widget.FrameLayout.LayoutParams fullscreenChatToggleLp =
-                new android.widget.FrameLayout.LayoutParams(dp(44), dp(74), android.view.Gravity.RIGHT | android.view.Gravity.CENTER_VERTICAL);
-        fullscreenChatToggleLp.setMargins(0, 0, 0, 0);
-        root.addView(fullscreenChatToggle, fullscreenChatToggleLp);
-        fullscreenChatToggle.bringToFront();
-
-        fullscreenChatToggle.setOnClickListener(v -> {
-            if (panel.getVisibility() == android.view.View.VISIBLE) {
-                panel.setVisibility(android.view.View.GONE);
-                fullscreenChatToggle.setText(">");
-            } else {
-                panel.setVisibility(android.view.View.VISIBLE);
-                fullscreenChatToggle.setText("<");
-                panel.bringToFront();
-                fullscreenChatToggle.bringToFront();
-            }
-        });
-
-
         d.setContentView(root);
-
         d.setOnDismissListener(x -> {
+            fullscreenDialog = null;
             fullscreenDanmakuRoot = null;
+            fullscreenCinemaRoot = null;
+            fullscreenChatPanel = null;
+            fullscreenChatHistory = null;
+            fullscreenChatScroll = null;
+            fullscreenMessageBubble = null;
+            if (fullscreenBubbleHideTask != null) handler.removeCallbacks(fullscreenBubbleHideTask);
+            fullscreenBubbleHideTask = null;
             final int exitPosMs = video.getCurrentPosition();
             final boolean exitPlaying = video.isPlaying();
             try {
                 ViewGroup p = (ViewGroup) video.getParent();
                 if (p != null) p.removeView(video);
+                if (subtitleOverlay != null) {
+                    ViewGroup sp = (ViewGroup) subtitleOverlay.getParent();
+                    if (sp != null) sp.removeView(subtitleOverlay);
+                }
                 originFrame.addView(video, 0, new FrameLayout.LayoutParams(-1, -1));
+                if (subtitleOverlay != null) {
+                    FrameLayout.LayoutParams subLp = new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+                    subLp.setMargins(dp(16), 0, dp(16), dp(18));
+                    originFrame.addView(subtitleOverlay, subLp);
+                }
                 videoFrame = originFrame;
                 forceRestoreAfterFullscreen(exitPosMs, exitPlaying);
                 setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
                 forceRestoreAfterFullscreen(exitPosMs, exitPlaying);
+                if (currentPage.equals("room")) publishCaptureBounds(originFrame, false);
+                else clearCaptureBounds();
                 if (exitPosMs > 1000) sendPlayback(true);
                 sendCinemaContext(true);
             } catch (Exception ignored) {}
         });
 
         d.show();
-
+        fullscreenDialog = d;
         Window w = d.getWindow();
         if (w != null) {
-            w.setBackgroundDrawable(new ColorDrawable(Color.BLACK));
+            w.setBackgroundDrawable(new ColorDrawable(color("#060914")));
             w.setLayout(-1, -1);
             w.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            w.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
         }
+        host.addOnLayoutChangeListener((v, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom) -> {
+            if (right - left > 0 && bottom - top > 0) publishCaptureBounds(host, true);
+        });
+        publishCaptureBounds(host, true);
     }
 
     private void renderCard() {

@@ -9,6 +9,7 @@ import android.os.Looper;
 import android.util.Base64;
 import android.view.Display;
 import android.view.accessibility.AccessibilityEvent;
+import android.view.accessibility.AccessibilityNodeInfo;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -60,6 +61,16 @@ public class CinemaAccessibilityService extends AccessibilityService {
         if (serverUrl.length() == 0) { setStatus("截图等待：后端地址为空"); return; }
         if (roomId.length() == 0) { setStatus("截图等待：还没有进入房间"); return; }
 
+        String activePackage = activePackageName();
+        if (!getPackageName().equals(activePackage)) {
+            setStatus("自动截图已暂停：映屿不在前台");
+            return;
+        }
+        if (!sp.getBoolean("captureBoundsValid", false)) {
+            setStatus("截图等待：放映幕还没有准备好");
+            return;
+        }
+
         long localReq = sp.getLong("screenshotRequestId", 0);
         long handledLocalReq = sp.getLong("lastHandledScreenshotRequestId", 0);
         boolean localForce = localReq > 0 && localReq != handledLocalReq;
@@ -71,9 +82,8 @@ public class CinemaAccessibilityService extends AccessibilityService {
         boolean auto = sp.getBoolean("autoScreenshot", false);
         if (!auto && !localForce && !remoteForce) return;
 
-        // v0.4.3：不再限制必须映屿在前台。用户开启截图开关/发起“看一眼”后，
-        // 无障碍服务会截取当前屏幕，便于 AI 看见此刻实际播放或展示的画面。
-        // 隐私控制改由“自动截图 ON/OFF”、系统无障碍截图权限、房间 Token 共同承担。
+        // v0.5.2：只在映屿位于前台、且播放器公布了有效边界时截图；
+        // 上传前还会裁切到放映幕，避免把聊天抽屉、通知或其他 App 画面交给服务器。
 
         boolean force = localForce || remoteForce;
         long now = System.currentTimeMillis();
@@ -82,6 +92,16 @@ public class CinemaAccessibilityService extends AccessibilityService {
         if (!force && now - last < intervalMs) return;
         sp.edit().putLong("lastScreenshotUploadMs", now).apply();
         takeAndUpload(serverUrl, roomId, token, name, force ? "accessibility-request" : "accessibility-low-frequency");
+    }
+
+    private String activePackageName() {
+        try {
+            AccessibilityNodeInfo root = getRootInActiveWindow();
+            if (root != null && root.getPackageName() != null) {
+                return root.getPackageName().toString();
+            }
+        } catch(Exception ignored) {}
+        return foregroundPackage == null ? "" : foregroundPackage;
     }
 
     private String helperName(String s) {
@@ -138,13 +158,21 @@ public class CinemaAccessibilityService extends AccessibilityService {
                         if (hw == null) { buffer.close(); setStatus("截图失败：bitmap 为空"); return; }
                         Bitmap bitmap = hw.copy(Bitmap.Config.ARGB_8888, false);
                         buffer.close();
-                        Bitmap small = resize(bitmap, 720);
-                        if (small != bitmap) bitmap.recycle();
+                        Bitmap cropped = cropToPlayer(bitmap);
+                        if (cropped == null) {
+                            bitmap.recycle();
+                            setStatus("截图暂停：无法确定放映幕边界");
+                            getSharedPreferences("cineisle", 0).edit().putLong("lastScreenshotUploadMs", 0).apply();
+                            return;
+                        }
+                        if (cropped != bitmap) bitmap.recycle();
+                        Bitmap small = resize(cropped, 720);
+                        if (small != cropped) cropped.recycle();
                         ByteArrayOutputStream bos = new ByteArrayOutputStream();
                         small.compress(Bitmap.CompressFormat.JPEG, 55, bos);
                         int w = small.getWidth();
                         int h = small.getHeight();
-                        if (small != hw) small.recycle();
+                        small.recycle();
                         String base64 = Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP);
                         upload(serverUrl, roomId, token, name, base64, w, h, source);
                     } catch(Exception e) {
@@ -171,6 +199,31 @@ public class CinemaAccessibilityService extends AccessibilityService {
         return Bitmap.createScaledBitmap(src, w, h, true);
     }
 
+    private Bitmap cropToPlayer(Bitmap src) {
+        try {
+            android.content.SharedPreferences sp = getSharedPreferences("cineisle", 0);
+            if (!sp.getBoolean("captureBoundsValid", false)) return null;
+            int screenW = sp.getInt("captureScreenWidth", 0);
+            int screenH = sp.getInt("captureScreenHeight", 0);
+            int left = sp.getInt("captureLeft", -1);
+            int top = sp.getInt("captureTop", -1);
+            int width = sp.getInt("captureWidth", 0);
+            int height = sp.getInt("captureHeight", 0);
+            if (screenW <= 0 || screenH <= 0 || left < 0 || top < 0 || width <= 0 || height <= 0) return null;
+
+            float sx = src.getWidth() / (float)screenW;
+            float sy = src.getHeight() / (float)screenH;
+            int x = Math.max(0, Math.round(left * sx));
+            int y = Math.max(0, Math.round(top * sy));
+            int w = Math.min(src.getWidth() - x, Math.round(width * sx));
+            int h = Math.min(src.getHeight() - y, Math.round(height * sy));
+            if (w < 64 || h < 64) return null;
+            return Bitmap.createBitmap(src, x, y, w, h);
+        } catch(Exception ignored) {
+            return null;
+        }
+    }
+
     private void upload(String serverUrl, String roomId, String token, String name, String base64, int width, int height, String source) throws Exception {
         String upPath = "/api/rooms/" + roomId + "/screenshot";
         if (token != null && token.length() > 0) upPath += "?token=" + java.net.URLEncoder.encode(token, "UTF-8");
@@ -193,7 +246,7 @@ public class CinemaAccessibilityService extends AccessibilityService {
         body.put("width", width);
         body.put("height", height);
         body.put("source", source);
-        body.put("note", "映屿画面同步：用户开启截图后上传当前屏幕，不再要求映屿处于前台。");
+        body.put("note", "映屿画面同步：仅在映屿前台运行，并只上传放映幕裁切区域。");
         try(OutputStream os = c.getOutputStream()) {
             os.write(body.toString().getBytes("UTF-8"));
         }
