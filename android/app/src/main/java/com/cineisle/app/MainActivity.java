@@ -2782,6 +2782,67 @@ public class MainActivity extends Activity {
         }, 160);
     }
 
+    private void applyFullscreenImeInset(LinearLayout panel, TextView hint,
+                                         TextView status, int imeBottom) {
+        if (panel == null) return;
+        ViewGroup.LayoutParams rawLp = panel.getLayoutParams();
+        if (!(rawLp instanceof FrameLayout.LayoutParams)) return;
+
+        boolean keyboardVisible = imeBottom > dp(120);
+        int wantedBottom = keyboardVisible ? imeBottom + dp(8) : dp(70);
+        FrameLayout.LayoutParams panelLp = (FrameLayout.LayoutParams) rawLp;
+        if (panelLp.bottomMargin != wantedBottom) {
+            panelLp.bottomMargin = wantedBottom;
+            panel.setLayoutParams(panelLp);
+        }
+
+        // On short landscape screens the keyboard leaves little vertical room.
+        // Keep both composers and the chat history visible; only fold away the
+        // explanatory/status copy while the user is typing.
+        int auxiliaryVisibility = keyboardVisible ? View.GONE : View.VISIBLE;
+        if (hint != null && hint.getVisibility() != auxiliaryVisibility) {
+            hint.setVisibility(auxiliaryVisibility);
+        }
+        if (status != null && status.getVisibility() != auxiliaryVisibility) {
+            status.setVisibility(auxiliaryVisibility);
+        }
+    }
+
+    private void installFullscreenImeGuard(final FrameLayout root,
+                                            final LinearLayout panel,
+                                            final TextView hint,
+                                            final TextView status) {
+        if (root == null || panel == null) return;
+
+        if (Build.VERSION.SDK_INT >= 30) {
+            root.setOnApplyWindowInsetsListener((v, insets) -> {
+                int imeBottom = 0;
+                try {
+                    if (insets.isVisible(WindowInsets.Type.ime())) {
+                        imeBottom = insets.getInsets(WindowInsets.Type.ime()).bottom;
+                    }
+                } catch (Exception ignored) {}
+                applyFullscreenImeInset(panel, hint, status, imeBottom);
+                return insets;
+            });
+            root.requestApplyInsets();
+            return;
+        }
+
+        // WindowInsets.Type.ime() starts at API 30. For older supported
+        // Android versions, infer the covered height from the visible frame.
+        root.getViewTreeObserver().addOnGlobalLayoutListener(() -> {
+            Rect visible = new Rect();
+            root.getWindowVisibleDisplayFrame(visible);
+            int[] location = new int[2];
+            root.getLocationOnScreen(location);
+            int rootBottom = location[1] + root.getHeight();
+            int covered = Math.max(0, rootBottom - visible.bottom);
+            applyFullscreenImeInset(panel, hint, status,
+                    covered > dp(120) ? covered : 0);
+        });
+    }
+
     private void openCinemaFullscreen() {
         if (video == null || videoFrame == null) {
             toast("先进入房间页");
@@ -3051,9 +3112,13 @@ public class MainActivity extends Activity {
             w.setLayout(WindowManager.LayoutParams.MATCH_PARENT,
                     WindowManager.LayoutParams.MATCH_PARENT);
             w.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-            w.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+            // The fullscreen immersive dialog is not resized consistently by
+            // Android. Keep its canvas stable and move only the chat drawer
+            // above the IME with the inset listener below.
+            w.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING);
             w.getDecorView().setSystemUiVisibility(root.getSystemUiVisibility());
         }
+        installFullscreenImeGuard(root, panel, drawerHint, drawerStatus);
         host.addOnLayoutChangeListener((v, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom) -> {
             if (right - left > 0 && bottom - top > 0) publishCaptureBounds(host, true);
         });

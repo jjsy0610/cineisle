@@ -6,7 +6,7 @@ const path = require("path");
 const app = express();
 const PORT = process.env.PORT || 8787;
 const TOKEN = process.env.CINEISLE_TOKEN || process.env.LINJIAN_CINEMA_TOKEN || "";
-const APP_VERSION = "0.5.3-landscape-input-fix";
+const APP_VERSION = "0.5.4-landscape-keyboard-composer";
 
 app.use(cors());
 app.use(express.json({ limit: "6mb" }));
