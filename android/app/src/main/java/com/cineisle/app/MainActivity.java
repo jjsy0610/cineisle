@@ -18,6 +18,7 @@ import android.net.Uri;
 import android.provider.OpenableColumns;
 import android.database.Cursor;
 import android.view.*;
+import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.*;
 import android.text.*;
@@ -2802,7 +2803,9 @@ public class MainActivity extends Activity {
         try { setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE); }
         catch (Exception ignored) {}
 
-        final Dialog d = new Dialog(this);
+        // Use a true fullscreen dialog theme. A regular Dialog keeps the
+        // underlying portrait activity visible in the landscape cutout inset.
+        final Dialog d = new Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen);
         d.requestWindowFeature(Window.FEATURE_NO_TITLE);
         d.setCanceledOnTouchOutside(false);
 
@@ -2878,6 +2881,10 @@ public class MainActivity extends Activity {
         panel.addView(fullscreenChatScroll, historyLp);
 
         final EditText talkInput = input("回一句悄悄话…", "");
+        talkInput.setImeOptions(EditorInfo.IME_ACTION_SEND
+                | EditorInfo.IME_FLAG_NO_EXTRACT_UI
+                | EditorInfo.IME_FLAG_NO_FULLSCREEN);
+        talkInput.setPrivateImeOptions("noFullscreen");
         talkInput.setTextColor(Color.WHITE);
         talkInput.setHintTextColor(color("#AEB9DC"));
         talkInput.setBackground(round(color("#E2202A47"), 16));
@@ -2890,6 +2897,10 @@ public class MainActivity extends Activity {
         add(panel, talkRow, -1, 42, 8);
 
         final EditText dmInput = input("发一条弹幕…", "");
+        dmInput.setImeOptions(EditorInfo.IME_ACTION_SEND
+                | EditorInfo.IME_FLAG_NO_EXTRACT_UI
+                | EditorInfo.IME_FLAG_NO_FULLSCREEN);
+        dmInput.setPrivateImeOptions("noFullscreen");
         dmInput.setTextColor(Color.WHITE);
         dmInput.setHintTextColor(color("#AEB9DC"));
         dmInput.setBackground(round(color("#E2202A47"), 16));
@@ -3028,9 +3039,20 @@ public class MainActivity extends Activity {
         Window w = d.getWindow();
         if (w != null) {
             w.setBackgroundDrawable(new ColorDrawable(color("#060914")));
-            w.setLayout(-1, -1);
+            WindowManager.LayoutParams attrs = w.getAttributes();
+            attrs.width = WindowManager.LayoutParams.MATCH_PARENT;
+            attrs.height = WindowManager.LayoutParams.MATCH_PARENT;
+            attrs.gravity = Gravity.FILL;
+            if (Build.VERSION.SDK_INT >= 28) {
+                attrs.layoutInDisplayCutoutMode =
+                        WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+            }
+            w.setAttributes(attrs);
+            w.setLayout(WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.MATCH_PARENT);
             w.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
             w.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+            w.getDecorView().setSystemUiVisibility(root.getSystemUiVisibility());
         }
         host.addOnLayoutChangeListener((v, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom) -> {
             if (right - left > 0 && bottom - top > 0) publishCaptureBounds(host, true);
